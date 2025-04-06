@@ -1,5 +1,6 @@
 from sklearn.preprocessing import StandardScaler
 import pandas as pd
+import numpy as np
 
 def combine_team_rows(df):
     """
@@ -127,6 +128,66 @@ def remove_all_star_and_playoff_games(df):
 
     return df
 
+def create_ml_dataset(df):
+    # Drop detailed score and city/abbreviation columns
+    drop_cols = [
+        'a_PTS_QTR1','a_PTS_QTR2','a_PTS_QTR3','a_PTS_QTR4','a_PTS_OT1','a_PTS_OT2','a_PTS_OT3','a_PTS_OT4',
+        'a_PTS_OT5','a_PTS_OT6','a_PTS_OT7','a_PTS_OT8','a_PTS_OT9','a_PTS_OT10','a_TEAM_ABBREVIATION','a_TEAM_CITY_NAME',
+        'h_PTS_QTR1','h_PTS_QTR2','h_PTS_QTR3','h_PTS_QTR4','h_PTS_OT1','h_PTS_OT2','h_PTS_OT3','h_PTS_OT4',
+        'h_PTS_OT5','h_PTS_OT6','h_PTS_OT7','h_PTS_OT8','h_PTS_OT9','h_PTS_OT10','h_TEAM_ABBREVIATION','h_TEAM_CITY_NAME'
+    ]
+    df = df.drop(columns=[col for col in drop_cols if col in df.columns], errors='ignore')
+
+    # Sort for lag calculation
+    df = df.sort_values(by=['YEAR', 'Date'])
+
+    # Initialize dictionaries to hold cumulative stats
+    lag_stats = ['PTS', 'AST', 'REB', 'TOV']
+    avg_stats = ['FG_PCT', 'FT_PCT', 'FG3_PCT']
+    for team_type in ['a', 'h']:
+        team_id_col = f'{team_type}_TEAM_ID'
+        prefix = f'{team_type}_'
+
+        for stat in lag_stats:
+            col = prefix + stat
+            df[f'{prefix}season_{stat}_lag'] = (
+                df.groupby([team_id_col, 'YEAR'])[col].cumsum() - df[col]
+            )
+
+        for stat in avg_stats:
+            col = prefix + stat
+            df[f'{prefix}season_{stat}_avg'] = (
+                df.groupby([team_id_col, 'YEAR'])[col].expanding().mean().shift().reset_index(level=[0,1], drop=True)
+            )
+
+        # Winning %
+        wins_col = f'{team_type}_WINS'
+        losses_col = f'{team_type}_LOSSES'
+        games_played = df[wins_col] + df[losses_col]
+        df[f'{prefix}WIN_PCT'] = df[wins_col] / games_played.replace(0, np.nan)
+
+        # Winning % in last 10 games
+        df[f'{prefix}WIN_PCT_LAST10'] = 0.5  # Default placeholder
+        team_games = df.groupby(team_id_col).apply(lambda group: group.sort_values('Date')).reset_index(drop=True)
+
+        last10_pct = []
+        for idx, row in df.iterrows():
+            team_id = row[team_id_col]
+            game_date = row['Date']
+            team_rows = df[(df[team_id_col] == team_id) & (df['Date'] < game_date)]
+            last_10 = team_rows.tail(10)
+            wins = 0
+            if team_type == 'a':
+                wins = last_10['HOME_WIN'].apply(lambda x: 1 - x).sum()
+            else:
+                wins = last_10['HOME_WIN'].sum()
+            total = len(last_10)
+            pct = wins / total if total > 0 else row[f'{prefix}WIN_PCT']
+            last10_pct.append(pct)
+
+        df[f'{prefix}WIN_PCT_LAST10'] = last10_pct
+
+    return df
 
 def standardize_features(df, feature_cols):
     scaler = StandardScaler()
